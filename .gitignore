@@ -1,0 +1,22 @@
+# Large data — never commit
+data/
+*.nii
+*.nii.gz
+*.dcm
+
+# Training outputs
+runs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+
+# Screenshots / exported images you don't need in the repo
+*.png
+
+# Editor
+.vscode/
+.idea/
