@@ -28,6 +28,11 @@ Output per case:
     confidence.nii       — per-voxel max softmax score  (low = uncertain regions)
 """
 
+
+# Allow running from project root
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 import os
 import glob
 import json

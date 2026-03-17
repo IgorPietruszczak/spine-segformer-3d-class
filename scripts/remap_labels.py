@@ -26,6 +26,11 @@ folder — data.py will automatically prefer *_segmentation_remapped.nii
 over *_segmentation.nii.
 """
 
+
+# Allow running from project root
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 import os
 import re
 import json
@@ -89,20 +94,41 @@ def remap_one_case(
     with open(json_path, encoding="utf-8") as f:
         raw_map: dict[str, str] = json.load(f)
 
-    # Build  {relative_id (int) → absolute_id (int)}
+    # Build  {voxel_id (int) → absolute_id (int)}
+    #
+    # The Slicer JSON export script numbers keys 1,2,3... sequentially,
+    # but the actual voxel values in the .nii are the original segment
+    # indices which start from a different number.
+    # Fix: sort both JSON keys and actual voxel IDs, then match positionally.
+    #   JSON key 1 (topmost vertebra) → smallest voxel ID in the volume
+    #   JSON key 2                    → next voxel ID
+    #   etc.
+
+    img_for_ids = nib.load(seg_path)
+    arr_for_ids = np.asarray(img_for_ids.dataobj).astype(np.int16)
+    voxel_ids_sorted = sorted(set(np.unique(arr_for_ids).tolist()) - {0})
+
+    json_items = sorted(raw_map.items(), key=lambda x: int(x[0]))
+
+    if len(json_items) != len(voxel_ids_sorted):
+        print(f"  [WARN] JSON has {len(json_items)} entries but volume has "
+              f"{len(voxel_ids_sorted)} non-zero IDs — will map what we can.")
+
     id_map   = {}
     skipped  = []
-    for rel_str, label_name in raw_map.items():
-        rel_id = int(rel_str)
-        key    = _parse_label_name(label_name)
+    for i, (rel_str, label_name) in enumerate(json_items):
+        if i >= len(voxel_ids_sorted):
+            break
+        voxel_id = voxel_ids_sorted[i]
+        key = _parse_label_name(label_name)
         if key is None:
-            skipped.append((rel_id, label_name))
+            skipped.append((voxel_id, label_name))
             continue
         abs_id = ABSOLUTE_IDS[key]
-        id_map[rel_id] = abs_id
+        id_map[voxel_id] = abs_id
 
-    img     = nib.load(seg_path)
-    arr     = np.asarray(img.dataobj).astype(np.int16)
+    img     = img_for_ids
+    arr     = arr_for_ids.copy()
     out     = np.zeros_like(arr, dtype=np.int16)
 
     present_abs = set()
@@ -116,7 +142,13 @@ def remap_one_case(
     unique_in_vol = set(np.unique(arr).tolist()) - {0}
     unmapped      = unique_in_vol - set(id_map.keys())
 
-    out_path = seg_path.replace("_segmentation.nii", "_segmentation_remapped.nii")
+    import re as _re
+    out_path = _re.sub(
+        r'[\s_]+segmentation\.nii$',
+        '_segmentation_remapped.nii',
+        seg_path,
+        flags=_re.IGNORECASE,
+    )
     if not dry_run:
         nib.save(nib.Nifti1Image(out, img.affine, img.header), out_path)
 

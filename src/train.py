@@ -44,6 +44,11 @@ from monai.inferers import sliding_window_inference
 from monai.transforms import KeepLargestConnectedComponent
 from monai.utils import set_determinism
 
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True  # graceful fallback if compile fails
+import torch
+torch.set_float32_matmul_precision("high")   # TF32 — free ~10% speedup on Ampere+
+
 from config import TrainConfig
 from data import list_pairs, split_pairs
 from model_segformer3d import SegFormer3D
@@ -54,9 +59,9 @@ from utils import ensure_dir, seed_everything, count_parameters, save_checkpoint
 from visualisation import seg_overlay_grid, ConfusionAccumulator
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Axis helpers  (MONAI: C,H,W,D  →  model: B,C,D,H,W)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+#  Axis helpers  (MONAI: C,H,W,D  ->  model: B,C,D,H,W)
+# -----------------------------------------------------------------------------
 
 def to_model(x: torch.Tensor) -> torch.Tensor:
     if x.ndim == 4:          # single item after decollate_batch
@@ -64,9 +69,9 @@ def to_model(x: torch.Tensor) -> torch.Tensor:
     return x.permute(0, 1, 4, 2, 3).contiguous()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  LCC post-processing
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _lcc = KeepLargestConnectedComponent(
     applied_labels=list(range(1, 18)),
@@ -78,9 +83,9 @@ def apply_lcc(pred_onehot: torch.Tensor) -> torch.Tensor:
     return _lcc(pred_onehot)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  LR scheduler with linear warmup + cosine decay
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class WarmupCosineScheduler(torch.optim.lr_scheduler.LambdaLR):
     """
@@ -105,9 +110,9 @@ class WarmupCosineScheduler(torch.optim.lr_scheduler.LambdaLR):
 
         def lr_lambda(epoch: int) -> float:
             if epoch < warmup_epochs:
-                # Linear ramp: 0 → 1
+                # Linear ramp: 0 -> 1
                 return (epoch + 1) / max(warmup_epochs, 1)
-            # Cosine tail: 1 → eta_min_ratio
+            # Cosine tail: 1 -> eta_min_ratio
             progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
             cosine   = 0.5 * (1.0 + math.cos(math.pi * progress))
             return self.min_r + (1.0 - self.min_r) * cosine
@@ -115,19 +120,19 @@ class WarmupCosineScheduler(torch.optim.lr_scheduler.LambdaLR):
         super().__init__(optimizer, lr_lambda=lr_lambda)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  Dataset builder  (CacheDataset when cache_rate > 0)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _build_dataset(pairs, transform, cache_rate: float, num_workers: int):
     """
-    CacheDataset runs the full preprocessing pipeline (Load → Orient →
-    Resample → Window) once per case and stores the result in RAM.
+    CacheDataset runs the full preprocessing pipeline (Load -> Orient ->
+    Resample -> Window) once per case and stores the result in RAM.
     On subsequent epochs the DataLoader reads directly from the cache —
     no disk I/O, no resampling.
 
-    cache_rate=1.0  → cache 100% of the dataset (recommended if RAM ≥ 8 GB)
-    cache_rate=0.0  → fallback to plain Dataset (original behaviour)
+    cache_rate=1.0  -> cache 100% of the dataset (recommended if RAM ≥ 8 GB)
+    cache_rate=0.0  -> fallback to plain Dataset (original behaviour)
 
     num_workers is used only for the initial cache-fill pass; normal epoch
     iteration uses num_workers=0 since data is already in RAM.
@@ -143,9 +148,9 @@ def _build_dataset(pairs, transform, cache_rate: float, num_workers: int):
     return Dataset(data=pairs, transform=transform)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  Single fold
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_one_fold(
     cfg:         TrainConfig,
@@ -159,14 +164,14 @@ def run_one_fold(
     ensure_dir(fold_dir)
     ckpt_path = os.path.join(fold_dir, "best.pt")
 
-    # ── TensorBoard ──────────────────────────────────────────────────────────
+    # -- TensorBoard ----------------------------------------------------------
     writer = None
     if cfg.use_tensorboard:
         tb_dir = cfg.tb_dir or os.path.join(fold_dir, "tb")
         writer = SummaryWriter(log_dir=tb_dir)
         writer.add_text("config", str(cfg.__dict__))
 
-    # ── Transforms ───────────────────────────────────────────────────────────
+    # -- Transforms -----------------------------------------------------------
     train_tf = build_train_transforms(
         isotropic_mm = cfg.isotropic_mm,
         patch_size   = cfg.patch_size,
@@ -185,7 +190,7 @@ def run_one_fold(
         reorient     = cfg.reorient,
     )
 
-    # ── Datasets  ────────────────────────────────────────────────────────────
+    # -- Datasets  ------------------------------------------------------------
     print(f"  Building cache (cache_rate={cfg.cache_rate}) …")
     t0 = time.time()
 
@@ -210,7 +215,7 @@ def run_one_fold(
     )
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
 
-    # ── Model ────────────────────────────────────────────────────────────────
+    # -- Model ----------------------------------------------------------------
     model = SegFormer3D(
         in_chans        = 1,
         num_seg_classes = cfg.num_seg_classes,
@@ -224,13 +229,13 @@ def run_one_fold(
     if cfg.use_compile:
         try:
             model = torch.compile(model, mode="reduce-overhead")
-            print("  torch.compile ✓")
+            print("  torch.compile OK")
         except Exception as e:
             print(f"  torch.compile skipped: {e}")
 
     print(f"  Parameters: {count_parameters(model)}")
 
-    # ── Loss / optimiser / scheduler ─────────────────────────────────────────
+    # -- Loss / optimiser / scheduler -----------------------------------------
     loss_fn   = build_loss(cfg.num_seg_classes).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -245,7 +250,7 @@ def run_one_fold(
     )
     scaler = torch.amp.GradScaler("cuda", enabled=device.startswith("cuda"))
 
-    # ── Metric / confusion trackers ───────────────────────────────────────────
+    # -- Metric / confusion trackers -------------------------------------------
     metric_tracker = MetricTracker()
     confusion_acc  = ConfusionAccumulator(cfg.num_seg_classes)
 
@@ -256,7 +261,7 @@ def run_one_fold(
 
     fold_start = time.time()
 
-    # ── Epoch loop ────────────────────────────────────────────────────────────
+    # -- Epoch loop ------------------------------------------------------------
     for epoch in range(1, cfg.num_epochs + 1):
         model.train()
         epoch_loss = 0.0
@@ -325,9 +330,14 @@ def run_one_fold(
                     epoch,
                 )
 
-        # ── Validation ────────────────────────────────────────────────────────
+        # -- Validation --------------------------------------------------------
         if epoch % cfg.val_interval != 0 and epoch != cfg.num_epochs:
             continue
+
+        # Free unused memory before the expensive sliding window pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        import gc; gc.collect()
 
         model.eval()
         metric_tracker.reset()
@@ -362,10 +372,15 @@ def run_one_fold(
                 gt_mask   = lab[0, 0].long()
                 confusion_acc.update(pred_mask, gt_mask)
 
-                if v_idx == 0:
+                if v_idx == 0 and (epoch % 40 == 0 or epoch == cfg.num_epochs):
                     first_img_cpu    = img.cpu()
                     first_logits_cpu = logits.cpu()
                     first_lab_cpu    = lab.cpu()
+
+                # Free immediately — don't accumulate large tensors
+                del pred_oh, lab_oh, pred_mask, gt_mask, logits
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         result = metric_tracker.compute()
         dice   = result["mean_dice"]
@@ -374,18 +389,16 @@ def run_one_fold(
         metric_tracker.log(writer, epoch)
         metric_tracker.print_table(epoch)
 
-        # ── Segmentation overlay ──────────────────────────────────────────────
+        # -- Visualisations (every 40 epochs only to save RAM) ----------------
         if writer and first_img_cpu is not None:
             try:
                 grid = seg_overlay_grid(first_img_cpu, first_logits_cpu,
                                         first_lab_cpu, alpha=0.45)
                 writer.add_image("val/seg_overlay",
                                  torch.from_numpy(grid), epoch)
+                del grid
             except Exception as exc:
                 print(f"  [vis] overlay skipped: {exc}")
-
-        # ── Confusion matrix ──────────────────────────────────────────────────
-        if writer:
             try:
                 import matplotlib.pyplot as plt
                 fig = confusion_acc.plot()
@@ -393,15 +406,18 @@ def run_one_fold(
                 plt.close(fig)
             except Exception as exc:
                 print(f"  [vis] confusion skipped: {exc}")
+            del first_img_cpu, first_logits_cpu, first_lab_cpu
+            first_img_cpu = first_logits_cpu = first_lab_cpu = None
+            import gc; gc.collect()
 
         writer and writer.flush()
 
-        # ── ETA estimate ─────────────────────────────────────────────────────
+        # -- ETA estimate -----------------------------------------------------
         elapsed_min = (time.time() - fold_start) / 60
         eta_min     = elapsed_min / epoch * (cfg.num_epochs - epoch)
         print(f"  elapsed {elapsed_min:.0f}min  |  ETA ~{eta_min:.0f}min")
 
-        # ── Checkpoint ────────────────────────────────────────────────────────
+        # -- Checkpoint --------------------------------------------------------
         improved = (dice > best_dice) or (
             dice == best_dice and hd95 < best_hd95
         )
@@ -416,7 +432,7 @@ def run_one_fold(
                 best_hd95 = best_hd95,
                 val_cases = [p["case_id"] for p in val_pairs],
             )
-            print(f"  ✓ new best  dice={best_dice:.4f}  hd95={best_hd95:.2f}")
+            print(f"  OK new best  dice={best_dice:.4f}  hd95={best_hd95:.2f}")
 
     if writer:
         writer.flush()
@@ -434,9 +450,9 @@ def run_one_fold(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 #  Public entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def run_training(cfg: TrainConfig, device: Optional[str] = None) -> List[Dict]:
     if device is None:
@@ -445,7 +461,7 @@ def run_training(cfg: TrainConfig, device: Optional[str] = None) -> List[Dict]:
     pairs = list_pairs(cfg.dataset_dir)
     print(f"\n  Found {len(pairs)} cases:")
     for p in pairs:
-        tag = "(remapped ✓)" if "remapped" in p["label"] else "(NOT remapped ⚠)"
+        tag = "(remapped OK)" if "remapped" in p["label"] else "(NOT remapped (!))"
         print(f"    {p['case_id']}  {tag}")
 
     # Print speed config summary
@@ -477,7 +493,7 @@ def run_training(cfg: TrainConfig, device: Optional[str] = None) -> List[Dict]:
 
             res = run_one_fold(cfg, train_p, val_p, fold_dir, device, fold_label)
             results.append(res)
-            print(f"  → fold {fold_idx}: dice={res['best_dice']:.4f}  "
+            print(f"  -> fold {fold_idx}: dice={res['best_dice']:.4f}  "
                   f"hd95={res['best_hd95']:.2f}")
 
         valid_dice = [r["best_dice"] for r in results if r["best_dice"] > 0]

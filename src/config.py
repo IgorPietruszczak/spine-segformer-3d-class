@@ -23,13 +23,13 @@ class TrainConfig:
     dataset_dir: str = ""
 
     # Resampling
-    isotropic_mm: float = 1.0
+    isotropic_mm: float = 1.5   # 1.5mm: 3.4x fewer voxels than 1.0mm, fits in 32GB RAM
     reorient:     str   = "RAS"
 
     # Patch sampling
     patch_size:             tuple = (96, 96, 96)   # (H, W, D) — MONAI convention
     pos_neg_ratio:          tuple = (7, 3)
-    num_samples_per_volume: int   = 8
+    num_samples_per_volume: int   = 4   # 8->4: halves patch memory per epoch
 
     # CT windowing (bone window — works well for spine CT)
     base_lo: float =  -1000.0
@@ -41,18 +41,18 @@ class TrainConfig:
 
     # ── Training ─────────────────────────────────────────────────────────────
     num_epochs:   int   = 200   # 200 + warmup converges as well as 300 without it
-    val_interval:       int   = 10   # validate every N epochs (10 = ~half the val overhead vs 5)
+    val_interval:       int   = 20   # validate every 20 epochs — reduces RAM pressure
     log_every_n_steps:  int   = 20   # per-batch loss logging frequency
 
     # ── Speed ─────────────────────────────────────────────────────────────
     # CacheDataset: preprocess every volume ONCE and keep in RAM.
     # With 6 cases this uses ~2-4 GB RAM and eliminates per-epoch disk I/O.
     # Set cache_rate=0.0 to disable (e.g. if RAM is limited).
-    cache_rate:         float = 1.0
+    cache_rate:         float = 0.0   # disabled - saves ~8GB RAM; volumes load fast enough
 
     # torch.compile() — PyTorch 2.x graph compiler, ~15% faster forward/backward.
     # Disable if you hit compatibility issues (e.g. older CUDA drivers).
-    use_compile:        bool  = True
+    use_compile:        bool  = False  # torch.compile requires Triton — not available on Windows
 
     # Sliding window overlap during VALIDATION (not test-time export).
     # 0.25 is ~3x faster than 0.5 with negligible metric difference during training.
@@ -78,8 +78,8 @@ class TrainConfig:
 
     # ── Inference ─────────────────────────────────────────────────────────────
     sw_overlap:    float = 0.5
-    sw_batch_size: int   = 1
-    keep_lcc:      bool  = True   # keep largest connected component per class
+    sw_batch_size: int   = 1   # keep at 1 - already minimal
+    keep_lcc:      bool  = False  # disabled during training to save RAM; used in infer_and_export.py
 
     # ── Output ───────────────────────────────────────────────────────────────
     out_dir: str = "runs/segformer3d_spine"
@@ -92,7 +92,7 @@ class TrainConfig:
     # "loocv"  — leave-one-out (good for ≤8 cases)
     # "fixed"  — fixed val set defined by val_case_ids (better for larger datasets)
     val_strategy: str       = "loocv"
-    val_case_ids: list      = None   # e.g. ["5_kosci_1.0", "7_vol_kr_kosci"]
+    val_case_ids: object = None  # list[str] | None — e.g. ["5_kosci_1.0", "7_vol_kr_kosci"]
 
     # ── Auto-test + NIfTI export after training ───────────────────────────────
     test_case_id:    Optional[str] = None

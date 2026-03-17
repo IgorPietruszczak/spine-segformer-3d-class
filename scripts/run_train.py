@@ -26,6 +26,21 @@ tensorboard --logdir runs/segformer3d_spine --port 6006
 import argparse
 import time
 import os
+import sys
+
+# Force UTF-8 output on Windows to avoid charmap encoding errors
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="monai")
+import subprocess
+import sys
+import webbrowser
+from threading import Timer
+
+# Allow running from project root: python scripts/run_train.py
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from config import TrainConfig
 from train import run_training
@@ -88,7 +103,7 @@ def main():
     if args.num_workers: cfg.num_workers  = args.num_workers
     if args.patch_size:  cfg.patch_size   = (args.patch_size,) * 3
 
-    # ── Print run summary ──────────────────────────────────────────────────
+    # -- Print run summary --------------------------------------------------
     print("\n" + "=" * 60)
     print("  SpineSegFormer3D — Training Run")
     print("=" * 60)
@@ -102,7 +117,30 @@ def main():
         print(f"  TensorBoard : tensorboard --logdir \"{cfg.out_dir}\" --port 6006")
     print("=" * 60 + "\n")
 
-    run_training(cfg)
+    # -- Launch TensorBoard automatically --------------------------------------
+    tb_proc = None
+    if cfg.use_tensorboard:
+        try:
+            tb_proc = subprocess.Popen(
+                [sys.executable, "-m", "tensorboard",
+                 "--logdir", cfg.out_dir,
+                 "--port", "6006",
+                 "--bind_all"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # Open browser after 4 seconds (TensorBoard needs time to start)
+            Timer(4.0, lambda: webbrowser.open("http://localhost:6006")).start()
+            print("  TensorBoard launched -> http://localhost:6006")
+        except Exception as e:
+            print(f"  TensorBoard auto-launch failed: {e}")
+            print(f"  Start manually: tensorboard --logdir \"{cfg.out_dir}\" --port 6006")
+
+    try:
+        run_training(cfg)
+    finally:
+        if tb_proc is not None:
+            tb_proc.terminate()
 
 
 if __name__ == "__main__":

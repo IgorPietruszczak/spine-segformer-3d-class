@@ -43,20 +43,20 @@ def build_metrics() -> tuple[DiceMetric, HausdorffDistanceMetric]:
     return dice, hd95
 
 
-# ── One-hot post-processing ────────────────────────────────────────────────────
-# Instantiate once and reuse to avoid repeated object creation
-_to_onehot = AsDiscrete(argmax=True, to_onehot=NUM_SEG_CLASSES)
-_lab_onehot = AsDiscrete(to_onehot=NUM_SEG_CLASSES)
-
-
 def pred_to_onehot(logits: torch.Tensor) -> torch.Tensor:
-    """(B, C, D, H, W) logits → (B, C, D, H, W) one-hot"""
-    return _to_onehot(logits)
+    """(B, C, D, H, W) logits -> (B, C, D, H, W) one-hot float32"""
+    import torch.nn.functional as F
+    pred = logits.argmax(dim=1)
+    oh   = F.one_hot(pred, num_classes=NUM_SEG_CLASSES)
+    return oh.permute(0, 4, 1, 2, 3).float()
 
 
 def label_to_onehot(label: torch.Tensor) -> torch.Tensor:
-    """(B, 1, D, H, W) int label → (B, C, D, H, W) one-hot"""
-    return _lab_onehot(label)
+    """(B, 1, D, H, W) int label -> (B, C, D, H, W) one-hot float32"""
+    import torch.nn.functional as F
+    lab = label[:, 0].long()
+    oh  = F.one_hot(lab, num_classes=NUM_SEG_CLASSES)
+    return oh.permute(0, 4, 1, 2, 3).float()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
